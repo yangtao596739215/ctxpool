@@ -98,6 +98,7 @@ func injectCtxPool(ctx context.Context, req interface{}) (context.Context, error
 }
 
 func resetCtxPool(ctx context.Context, req interface{}, err error) context.Context {
+	//rpc框架没提供数据写完后的回调，所以只能检测ctx是否Done了，为了不阻塞现场，只能异步，可以考虑用goroutine-pool来优化，其实这样也够用，新版本的go在创建g的时候做了优化
 	go func() {
 		select {
 		case <-ctx.Done():
