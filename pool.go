@@ -108,5 +108,6 @@ func resetCtxPool(ctx context.Context, req interface{}, err error) context.Conte
 			log.Printf("resetCtxPool wait for 20s")
 		}
 	}()
+	//可以用ctx.Deadline()获取超时时间，包装成延时队列对象，然后统一处理
 	return ctx
 }
