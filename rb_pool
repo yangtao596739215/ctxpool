@@ -1,0 +1,63 @@
+package ctxpool
+
+import (
+	"sync"
+)
+
+type RbPool struct {
+	c   []interface{}
+	cap int // constant
+	l   uint64
+	r   uint64
+
+	lock sync.Mutex
+	init func() interface{}
+}
+
+func NewRbPool(cap, fillPercent int, init func() interface{}) *RbPool {
+	if fillPercent > 100 {
+		fillPercent = 100
+	}
+	if fillPercent < 0 {
+		fillPercent = 0
+	}
+
+	c := make([]interface{}, cap)
+
+	r := cap * fillPercent / 100
+	for i := 0; i < r; i++ {
+		c[i] = init()
+	}
+	return &RbPool{
+		c:   c,
+		l:   0,
+		r:   uint64(r),
+		cap: cap,
+
+		lock: sync.Mutex{},
+		init: init,
+	}
+}
+
+func (r *RbPool) Get() interface{} {
+	r.lock.Lock()
+	defer func() {
+		r.l++
+		r.lock.Unlock()
+	}()
+	v := r.c[r.l%uint64(r.cap)]
+	if v == nil {
+		return r.init()
+	}
+	r.c[r.l%uint64(r.cap)] = nil
+	return v
+}
+
+func (r *RbPool) Put(v interface{}) {
+	r.lock.Lock()
+	defer func() {
+		r.lock.Unlock()
+		r.r++
+	}()
+	r.c[r.r%uint64(r.cap)] = v
+}
