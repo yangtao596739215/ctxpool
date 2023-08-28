@@ -1,0 +1,94 @@
+package ctxpool
+
+import (
+	"sync/atomic"
+	"time"
+	"unsafe"
+)
+
+type LockFreePool struct {
+	head      *poolNode
+	cap       int32
+	len       int32
+	createFn  func() interface{}
+	nodeCache *LockFreePool
+}
+
+type poolNode struct {
+	obj  interface{}
+	next *poolNode
+}
+
+func newNodeCache(cap int32) *LockFreePool {
+	return &LockFreePool{
+		createFn: func() interface{} {
+			return &poolNode{}
+		},
+		cap: cap,
+		len: cap,
+	}
+}
+
+func NewLockFreePool(cap int32, createFn func() interface{}) *LockFreePool {
+	pool := &LockFreePool{
+		createFn:  createFn,
+		cap:       cap,
+		len:       cap,
+		nodeCache: newNodeCache(cap),
+	}
+
+	head := pool.nodeCache.Get().(*poolNode)
+	head.obj = createFn()
+
+	current := head
+	for i := int32(1); i < cap; i++ {
+		node := pool.nodeCache.Get().(*poolNode)
+		node.obj = createFn()
+		current.next = node
+		current = node
+	}
+
+	pool.head = head
+	return pool
+}
+
+func (p *LockFreePool) Put(obj interface{}) {
+	if obj == nil {
+		return
+	}
+	if atomic.LoadInt32(&p.len) >= p.cap {
+		return
+	}
+	node := p.nodeCache.Get().(*poolNode)
+	node.obj = obj
+
+	for {
+		node.next = p.loadHead()
+		if atomic.CompareAndSwapPointer((*unsafe.Pointer)(unsafe.Pointer(&p.head)), unsafe.Pointer(node.next), unsafe.Pointer(node)) {
+			atomic.AddInt32(&p.len, 1)
+			break
+		}
+		time.Sleep(time.Microsecond)
+	}
+}
+
+func (p *LockFreePool) Get() interface{} {
+	for {
+		head := p.loadHead()
+		if head == nil {
+			return p.createFn()
+		}
+		if atomic.CompareAndSwapPointer((*unsafe.Pointer)(unsafe.Pointer(&p.head)), unsafe.Pointer(head), unsafe.Pointer(head.next)) {
+			atomic.AddInt32(&p.len, -1)
+			obj := head.obj
+			head.obj = nil
+			p.nodeCache.Put(head)
+			return obj
+		}
+		time.Sleep(time.Microsecond)
+	}
+}
+
+func (p *LockFreePool) loadHead() *poolNode {
+	return (*poolNode)(atomic.LoadPointer((*unsafe.Pointer)(unsafe.Pointer(&p.head))))
+}
