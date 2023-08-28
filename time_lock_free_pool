@@ -1,0 +1,130 @@
+package ctxpool
+
+import (
+	"fmt"
+	"sync/atomic"
+	"time"
+	"unsafe"
+)
+
+type TimeLockFreePool struct {
+	head      *timePoolNode
+	cap       int32
+	len       int32
+	createFn  func() interface{}
+	nodeCache *TimeLockFreePool
+	expire    time.Duration
+}
+
+type timePoolNode struct {
+	obj  interface{}
+	next *timePoolNode
+}
+
+func newTimeNodeCache(cap int32) *TimeLockFreePool {
+	return &TimeLockFreePool{
+		createFn: func() interface{} {
+			return &timePoolNode{}
+		},
+		cap: cap,
+		len: cap,
+	}
+}
+
+func NewTimeLockFreePool(createFn func() interface{}, cap int32, expire time.Duration) *TimeLockFreePool {
+	pool := &TimeLockFreePool{
+		createFn:  createFn,
+		cap:       cap,
+		len:       cap,
+		nodeCache: newTimeNodeCache(cap),
+		expire:    expire,
+	}
+
+	head := pool.nodeCache.Get().(*timePoolNode)
+	head.obj = createFn()
+
+	current := head
+	for i := int32(1); i < cap; i++ {
+		node := pool.nodeCache.Get().(*timePoolNode)
+		node.obj = createFn()
+		current.next = node
+		current = node
+	}
+
+	pool.head = head
+	return pool
+}
+
+func (p *TimeLockFreePool) Put(obj interface{}) {
+	if obj == nil {
+		return
+	}
+	if atomic.LoadInt32(&p.len) >= p.cap {
+		return
+	}
+	node := p.nodeCache.Get().(*timePoolNode)
+	node.obj = obj
+
+	for {
+		node.next = p.loadHead()
+		if atomic.CompareAndSwapPointer((*unsafe.Pointer)(unsafe.Pointer(&p.head)), unsafe.Pointer(node.next), unsafe.Pointer(node)) {
+			atomic.AddInt32(&p.len, 1)
+			break
+		}
+	}
+}
+
+func (p *TimeLockFreePool) Get() interface{} {
+	var obj interface{}
+	for {
+		head := p.loadHead()
+		if head == nil {
+			obj = p.createFn()
+			break
+		}
+		if atomic.CompareAndSwapPointer((*unsafe.Pointer)(unsafe.Pointer(&p.head)), unsafe.Pointer(head), unsafe.Pointer(head.next)) {
+			atomic.AddInt32(&p.len, -1)
+			obj = head.obj
+			head.obj = nil
+			p.nodeCache.Put(head)
+			break
+		}
+	}
+
+	// 使用 time.AfterFunc 代替基于 time.Time 的定期检查
+	time.AfterFunc(p.expire, func() {
+		p.Put(obj)
+	})
+
+	return obj
+}
+
+func (p *TimeLockFreePool) loadHead() *timePoolNode {
+	return (*timePoolNode)(atomic.LoadPointer((*unsafe.Pointer)(unsafe.Pointer(&p.head))))
+}
+
+// 示例对象
+type ExampleObject struct {
+	Value int
+}
+
+func (e *ExampleObject) Reset() {
+	e.Value = 0
+}
+
+func main() {
+	pool := NewTimeLockFreePool(func() interface{} {
+		return &ExampleObject{Value: 0}
+	}, 10, 20*time.Second)
+
+	obj := pool.Get().(*ExampleObject)
+	fmt.Println(obj.Value) // 0
+
+	pool.Put(&ExampleObject{Value: 1})
+	obj = pool.Get().(*ExampleObject)
+	fmt.Println(obj.Value) // 1
+
+	// 业务处理 Reset
+	obj.Reset()
+	fmt.Println(obj.Value) // 0
+}
