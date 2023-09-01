@@ -1,0 +1,104 @@
+package main
+
+import (
+	"fmt"
+	"runtime"
+	"sync"
+	"unsafe"
+)
+
+type g struct {
+	m uintptr
+}
+
+const gGoroutineIDOffset = 152 // Go1.10
+
+func GetGoroutineID() int64 {
+	g := getG()
+	p := (*int64)(unsafe.Pointer(uintptr(g) + gGoroutineIDOffset))
+	return *p
+}
+
+type gobuf struct {
+	sp   uintptr
+	pc   uintptr
+	g    uintptr
+	ctxt unsafe.Pointer
+	ret  uintptr
+	lr   uintptr
+	bp   uintptr // for framepointer-enabled architectures
+}
+type stack struct {
+	lo uintptr
+	hi uintptr
+}
+type gsignalStack struct {
+	stack       stack
+	stackguard0 uintptr
+	stackguard1 uintptr
+	stktopsp    uintptr
+}
+
+type m struct {
+	g0      *g     // goroutine with scheduling stack
+	morebuf gobuf  // gobuf arg to morestack
+	divmod  uint32 // div/mod denominator for arm - known to liblink
+	_       uint32 // align next field to 8 bytes
+
+	// Fields not known to debuggers.
+	procid     uint64       // for debuggers, but offset not hard-coded
+	gsignal    *g           // signal-handling g
+	goSigStack gsignalStack // Go-allocated signal handling stack
+	sigmask    uint32       // storage for saved signal mask
+	tls        [6]uintptr   // thread-local storage (for x86 extern register)
+	mstartfn   func()
+	curg       *g      // current running goroutine
+	caughtsig  int64   // goroutine running during fatal signal
+	p          uintptr // attached p for executing go code (nil if not executing go code)
+	nextp      int64
+	oldp       int64 // the p that was attached before executing a syscall
+	id         int64
+}
+
+func GetPID() int64 {
+	mAddr := getm()
+	pp := (*p)(unsafe.Pointer(mAddr + unsafe.Offsetof(m{}.p)))
+	return int64(pp.id)
+}
+
+func GetMID() int64 {
+	mAddr := getm()
+	pp := (*int64)(unsafe.Pointer(mAddr + unsafe.Offsetof(m{}.id)))
+	return *pp
+}
+
+//go:linkname getG runtime.getg
+func getG() uintptr
+
+//go:linkname getm runtime.getm
+func getm() uintptr
+
+type p struct {
+	id int32
+}
+
+func main() {
+	var wg sync.WaitGroup
+	s := map[int64]bool{}
+	mu := sync.Mutex{}
+	for i := 0; i < 10000; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			runtime.LockOSThread()
+			defer runtime.UnlockOSThread()
+			mu.Lock()
+			s[GetPID()] = true
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+	//打印出来有限的pid
+	fmt.Println(s)
+	//本来想通过获取pid，做一些无锁的pool，但是获取pid的过程本身不轻了，做起来不是很好做，还是通过分多个shard减少锁竞争来的比较快
+}
